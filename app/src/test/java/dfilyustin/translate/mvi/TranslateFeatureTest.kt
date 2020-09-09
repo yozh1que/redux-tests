@@ -36,17 +36,20 @@ class TranslateFeatureTest {
 
     private lateinit var feature: TranslateFeature
     private lateinit var mockRepository: TranslateRepository
+    private lateinit var testScheduler: TestScheduler
     private lateinit var observer: TestObserver<TranslateState>
 
     @Before
     fun before() {
         observer = TestObserver()
+        testScheduler = TestScheduler()
         mockRepository = Mockito.mock(TranslateRepository::class.java)
         feature = TranslateFeature(
             actor = TranslateActor(
                 repository = mockRepository,
                 ioScheduler = Schedulers.trampoline(),
-                uiScheduler = Schedulers.trampoline()
+                uiScheduler = Schedulers.trampoline(),
+                computationScheduler = testScheduler
             )
         )
 
@@ -54,7 +57,7 @@ class TranslateFeatureTest {
     }
 
     @Test
-    fun `successful request`() {
+    fun `scheduled debounced request retrieves translations once`() {
         Mockito.`when`(mockRepository.getTranslation(anyString())).thenReturn(
             Single.just(
                 translations
@@ -62,11 +65,17 @@ class TranslateFeatureTest {
         )
 
         feature.accept(TranslateAction.UpdateQuery(validQuery))
-        feature.accept(TranslateAction.Submit)
+        testScheduler.advanceTimeBy(10L, TimeUnit.MILLISECONDS)
+        feature.accept(TranslateAction.UpdateQuery("$validQuery q"))
+        testScheduler.advanceTimeBy(10L, TimeUnit.MILLISECONDS)
+        feature.accept(TranslateAction.UpdateQuery(validQuery))
+        fulfillDebounceRequirements()
 
         assertEquals(
             listOf(
                 TranslateState(),
+                TranslateState(query = validQuery, submitAllowed = true),
+                TranslateState(query = "$validQuery q", submitAllowed = true),
                 TranslateState(query = validQuery, submitAllowed = true),
                 TranslateState(
                     query = validQuery,
@@ -85,11 +94,11 @@ class TranslateFeatureTest {
     }
 
     @Test
-    fun `unsuccessful request`() {
+    fun `unsuccessful request is reflected in state`() {
         Mockito.`when`(mockRepository.getTranslation(anyString())).thenReturn(Single.error(error))
 
         feature.accept(TranslateAction.UpdateQuery(validQuery))
-        feature.accept(TranslateAction.Submit)
+        fulfillDebounceRequirements()
 
         assertEquals(
             listOf(
@@ -107,12 +116,11 @@ class TranslateFeatureTest {
     }
 
     @Test
-    fun `uninitialized request`() {
+    fun `invalid queries are skipped`() {
         feature.accept(TranslateAction.UpdateQuery(wrongSymbols))
-        feature.accept(TranslateAction.Submit)
-        feature.accept(TranslateAction.Submit)
-        feature.accept(TranslateAction.Submit)
+        fulfillDebounceRequirements()
         feature.accept(TranslateAction.UpdateQuery(shortQuery))
+        fulfillDebounceRequirements()
 
         assertEquals(
             listOf(
@@ -125,25 +133,28 @@ class TranslateFeatureTest {
     }
 
     @Test
-    fun `subsequent query cancels ongoing request`() {
-        val scheduler = TestScheduler()
+    fun `subsequent queries cancel ongoing requests`() {
+        val apiTestScheduler = TestScheduler()
         val observer = TestObserver<TranslateState>()
         Mockito.`when`(mockRepository.getTranslation(anyString()))
-            .thenReturn(Single.timer(1L, TimeUnit.SECONDS, scheduler).map { translations })
+            .thenReturn(Single.timer(3L, TimeUnit.SECONDS, apiTestScheduler).map { translations })
         val feature = TranslateFeature(
             actor = TranslateActor(
                 repository = mockRepository,
                 uiScheduler = Schedulers.trampoline(),
-                ioScheduler = Schedulers.trampoline()
+                ioScheduler = Schedulers.trampoline(),
+                computationScheduler = testScheduler
             )
         )
         feature.subscribe(observer)
 
-
-
         feature.accept(TranslateAction.UpdateQuery(validQuery))
-        feature.accept(TranslateAction.Submit)
+        fulfillDebounceRequirements()
+        // cancels the ongoing request
         feature.accept(TranslateAction.UpdateQuery("$validQuery q"))
+        fulfillDebounceRequirements()
+        // completes second ongoing request
+        apiTestScheduler.advanceTimeBy(10L, TimeUnit.SECONDS)
 
         assertEquals(
             listOf(
@@ -164,9 +175,25 @@ class TranslateFeatureTest {
                     query = "$validQuery q",
                     submitAllowed = true,
                     requestState = RequestState.Idle
+                ),
+                TranslateState(
+                    query = "$validQuery q",
+                    submitAllowed = true,
+                    requestState = RequestState.Running
+                ),
+                TranslateState(
+                    query = "$validQuery q",
+                    submitAllowed = true,
+                    requestState = RequestState.Idle,
+                    translations = translations
                 )
             ),
             observer.values()
         )
+    }
+
+    private fun fulfillDebounceRequirements() {
+        // wait until debounce windows expires to emit an api request
+        testScheduler.advanceTimeBy(1L, TimeUnit.SECONDS)
     }
 }

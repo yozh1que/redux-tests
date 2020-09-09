@@ -1,15 +1,16 @@
 package dfilyustin.translate.mvi
 
-import android.util.Log
 import com.badoo.mvicore.element.Actor
+import com.badoo.mvicore.element.PostProcessor
 import com.badoo.mvicore.element.Reducer
-import com.badoo.mvicore.feature.ActorReducerFeature
+import com.badoo.mvicore.feature.BaseFeature
 import dfilyustin.translate.model.Translation
 import dfilyustin.translate.repository.TranslateRepository
 import dfilyustin.translate.utils.RequestState
 import io.reactivex.Observable
 import io.reactivex.Scheduler
 import io.reactivex.subjects.PublishSubject
+import java.util.concurrent.TimeUnit
 
 data class TranslateState(
     val query: String? = null,
@@ -19,8 +20,9 @@ data class TranslateState(
 )
 
 sealed class TranslateAction {
+    object Init : TranslateAction()
     data class UpdateQuery(val query: String) : TranslateAction()
-    object Submit : TranslateAction()
+    data class ScheduleSubmit(val query: String) : TranslateAction()
 }
 
 sealed class TranslateEffect {
@@ -37,13 +39,16 @@ sealed class TranslateEffect {
 
 class TranslateActor(
     private val repository: TranslateRepository,
+    private val computationScheduler: Scheduler,
     private val ioScheduler: Scheduler,
     private val uiScheduler: Scheduler
 ) : Actor<TranslateState, TranslateAction, TranslateEffect> {
 
-    private val submitSubject = PublishSubject.create<Unit>()
+    private val submitSubject = PublishSubject.create<String>()
+    private val inputSubject = PublishSubject.create<Unit>()
 
     companion object {
+        private const val discardUntilMillis = 300L
         private val isQueryValid = Regex("^[a-zA-Z]{2,}[a-zA-Z ]*$")
     }
 
@@ -51,28 +56,34 @@ class TranslateActor(
         state: TranslateState,
         action: TranslateAction
     ): Observable<out TranslateEffect> {
-        Log.d("DEBUG FEATURE", "ACTION $action")
         return when (action) {
-            is TranslateAction.UpdateQuery -> Observable.fromCallable {
-                TranslateEffect.UpdatedQuery(
-                    query = action.query,
-                    submitAllowed = isSubmitAllowed(action.query)
-                )
-            }
-                .doOnNext { submitSubject.onNext(Unit) }
-                .observeOn(uiScheduler)
-            TranslateAction.Submit -> (state.query?.takeIf { state.submitAllowed }?.let {
-                repository
-                    .getTranslation(it)
-                    .toObservable()
-                    .takeUntil(submitSubject)
-                    .map<TranslateEffect>(TranslateEffect::ReceivedTranslations)
-                    .mergeWith(submitSubject.map { TranslateEffect.CancelledQuery })
-                    .onErrorReturn(TranslateEffect::FailedTranslation)
-                    .startWith(TranslateEffect.SubmittedQuery)
-            } ?: Observable.empty<TranslateEffect>())
+            TranslateAction.Init -> submitSubject
+                .debounce(discardUntilMillis, TimeUnit.MILLISECONDS, computationScheduler)
+                .switchMap {
+                    repository
+                        .getTranslation(it)
+                        .toObservable()
+                        .takeUntil(inputSubject)
+                        .map<TranslateEffect>(TranslateEffect::ReceivedTranslations)
+                        .mergeWith(inputSubject.map { TranslateEffect.CancelledQuery })
+                        .onErrorReturn(TranslateEffect::FailedTranslation)
+                        .startWith(TranslateEffect.SubmittedQuery)
+                }
                 .subscribeOn(ioScheduler)
                 .observeOn(uiScheduler)
+            is TranslateAction.UpdateQuery -> {
+                inputSubject.onNext(Unit)
+                Observable.just(
+                    TranslateEffect.UpdatedQuery(
+                        query = action.query,
+                        submitAllowed = isSubmitAllowed(action.query)
+                    )
+                )
+            }
+            is TranslateAction.ScheduleSubmit -> {
+                submitSubject.onNext(action.query)
+                Observable.empty()
+            }
         }
     }
 
@@ -101,13 +112,27 @@ class TranslateReducer : Reducer<TranslateState, TranslateEffect> {
                 translations = null,
                 requestState = RequestState.Failed(effect.e)
             )
-
         }
 }
 
+class TranslatePostProcessor : PostProcessor<TranslateAction, TranslateEffect, TranslateState> {
+    override fun invoke(
+        action: TranslateAction,
+        effect: TranslateEffect,
+        state: TranslateState
+    ): TranslateAction? = when (effect) {
+        is TranslateEffect.UpdatedQuery -> TranslateAction.ScheduleSubmit(effect.query)
+            .takeIf { effect.submitAllowed }
+        else -> null
+    }
+}
+
 class TranslateFeature(actor: TranslateActor) :
-    ActorReducerFeature<TranslateAction, TranslateEffect, TranslateState, Any>(
+    BaseFeature<TranslateAction, TranslateAction, TranslateEffect, TranslateState, Any>(
         initialState = TranslateState(),
         actor = actor,
-        reducer = TranslateReducer()
+        wishToAction = { it },
+        reducer = TranslateReducer(),
+        bootstrapper = { Observable.just(TranslateAction.Init) },
+        postProcessor = TranslatePostProcessor()
     )
