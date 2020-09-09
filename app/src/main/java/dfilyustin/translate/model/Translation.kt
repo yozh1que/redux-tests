@@ -1,6 +1,11 @@
 package dfilyustin.translate.model
 
 data class Translation(
-    val translation: String,
-    val meanings: List<String>
-)
+    val originalText: String,
+    val meanings: List<Meaning>
+) {
+    data class Meaning(
+        val translatedText: String,
+        val imageUrl: String
+    )
+}

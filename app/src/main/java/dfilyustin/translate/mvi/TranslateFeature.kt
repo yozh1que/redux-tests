@@ -1,5 +1,6 @@
 package dfilyustin.translate.mvi
 
+import android.util.Log
 import com.badoo.mvicore.element.Actor
 import com.badoo.mvicore.element.Reducer
 import com.badoo.mvicore.feature.ActorReducerFeature
@@ -12,7 +13,7 @@ import io.reactivex.subjects.PublishSubject
 
 data class TranslateState(
     val query: String? = null,
-    val translation: Translation? = null,
+    val translations: List<Translation>? = null,
     val submitAllowed: Boolean = false,
     val requestState: RequestState = RequestState.Idle
 )
@@ -30,7 +31,7 @@ sealed class TranslateEffect {
 
     object SubmittedQuery : TranslateEffect()
     object CancelledQuery : TranslateEffect()
-    data class ReceivedTranslation(val translation: Translation) : TranslateEffect()
+    data class ReceivedTranslations(val translations: List<Translation>) : TranslateEffect()
     data class FailedTranslation(val e: Throwable) : TranslateEffect()
 }
 
@@ -49,26 +50,32 @@ class TranslateActor(
     override fun invoke(
         state: TranslateState,
         action: TranslateAction
-    ): Observable<out TranslateEffect> = when (action) {
-        is TranslateAction.UpdateQuery -> Observable.fromCallable {
-            TranslateEffect.UpdatedQuery(
-                query = action.query,
-                submitAllowed = isSubmitAllowed(action.query)
-            )
-        }.doOnNext { submitSubject.onNext(Unit) }
-        TranslateAction.Submit -> state.query?.takeIf { state.submitAllowed }?.let {
-            repository
-                .getTranslation(it)
-                .toObservable()
-                .takeUntil(submitSubject)
-                .map<TranslateEffect>(TranslateEffect::ReceivedTranslation)
-                .mergeWith(submitSubject.map { TranslateEffect.CancelledQuery })
-                .onErrorReturn(TranslateEffect::FailedTranslation)
-                .startWith(TranslateEffect.SubmittedQuery)
-        } ?: Observable.empty<TranslateEffect>()
+    ): Observable<out TranslateEffect> {
+        Log.d("DEBUG FEATURE", "ACTION $action")
+        return when (action) {
+            is TranslateAction.UpdateQuery -> Observable.fromCallable {
+                TranslateEffect.UpdatedQuery(
+                    query = action.query,
+                    submitAllowed = isSubmitAllowed(action.query)
+                )
+            }
+                .doOnNext { submitSubject.onNext(Unit) }
+                .observeOn(uiScheduler)
+            TranslateAction.Submit -> (state.query?.takeIf { state.submitAllowed }?.let {
+                repository
+                    .getTranslation(it)
+                    .toObservable()
+                    .takeUntil(submitSubject)
+                    .map<TranslateEffect>(TranslateEffect::ReceivedTranslations)
+                    .mergeWith(submitSubject.map { TranslateEffect.CancelledQuery })
+                    .onErrorReturn(TranslateEffect::FailedTranslation)
+                    .startWith(TranslateEffect.SubmittedQuery)
+            } ?: Observable.empty<TranslateEffect>())
+                .subscribeOn(ioScheduler)
+                .observeOn(uiScheduler)
+        }
     }
-        .subscribeOn(ioScheduler)
-        .observeOn(uiScheduler)
+
 
     private fun isSubmitAllowed(query: String): Boolean = isQueryValid.matches(query.trim())
 
@@ -77,18 +84,21 @@ class TranslateActor(
 class TranslateReducer : Reducer<TranslateState, TranslateEffect> {
     override fun invoke(state: TranslateState, effect: TranslateEffect): TranslateState =
         when (effect) {
-            is TranslateEffect.UpdatedQuery -> state.copy(query = effect.query, submitAllowed = effect.submitAllowed)
+            is TranslateEffect.UpdatedQuery -> state.copy(
+                query = effect.query,
+                submitAllowed = effect.submitAllowed
+            )
             TranslateEffect.SubmittedQuery -> state.copy(requestState = RequestState.Running)
             TranslateEffect.CancelledQuery -> state.copy(
                 requestState = RequestState.Idle
             )
-            is TranslateEffect.ReceivedTranslation -> state.copy(
-                translation = effect.translation,
+            is TranslateEffect.ReceivedTranslations -> state.copy(
+                translations = effect.translations,
                 requestState = RequestState.Idle
             )
             is TranslateEffect.FailedTranslation -> state.copy(
                 query = null,
-                translation = null,
+                translations = null,
                 requestState = RequestState.Failed(effect.e)
             )
 

@@ -17,8 +17,17 @@ import java.util.concurrent.TimeUnit
 class TranslateFeatureTest {
 
     companion object {
-        private val translation =
-            Translation(translation = "translation", meanings = listOf("meaning"))
+        private val translations = listOf(
+            Translation(
+                originalText = "translation",
+                meanings = listOf(
+                    Translation.Meaning(
+                        translatedText = "translated",
+                        imageUrl = "url"
+                    )
+                )
+            )
+        )
         private const val validQuery = "Query one"
         private const val wrongSymbols = "Query 11"
         private const val shortQuery = "Q"
@@ -48,7 +57,7 @@ class TranslateFeatureTest {
     fun `successful request`() {
         Mockito.`when`(mockRepository.getTranslation(anyString())).thenReturn(
             Single.just(
-                translation
+                translations
             )
         )
 
@@ -68,7 +77,7 @@ class TranslateFeatureTest {
                     query = validQuery,
                     submitAllowed = true,
                     requestState = RequestState.Idle,
-                    translation = translation
+                    translations = translations
                 )
             ),
             observer.values()
@@ -120,7 +129,7 @@ class TranslateFeatureTest {
         val scheduler = TestScheduler()
         val observer = TestObserver<TranslateState>()
         Mockito.`when`(mockRepository.getTranslation(anyString()))
-            .thenReturn(Single.timer(1L, TimeUnit.SECONDS, scheduler).map { translation })
+            .thenReturn(Single.timer(1L, TimeUnit.SECONDS, scheduler).map { translations })
         val feature = TranslateFeature(
             actor = TranslateActor(
                 repository = mockRepository,
