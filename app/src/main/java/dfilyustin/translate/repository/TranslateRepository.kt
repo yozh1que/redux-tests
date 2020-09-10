@@ -44,6 +44,7 @@ interface TranslateApi {
 
     class MeaningResponse(
         val translation: TranslationValueResponse,
+//        @SerializedName("")
         val imageUrl: String
     )
 

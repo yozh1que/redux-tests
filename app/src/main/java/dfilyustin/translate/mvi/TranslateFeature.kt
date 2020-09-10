@@ -1,5 +1,6 @@
 package dfilyustin.translate.mvi
 
+import android.util.Log
 import com.badoo.mvicore.element.Actor
 import com.badoo.mvicore.element.PostProcessor
 import com.badoo.mvicore.element.Reducer
@@ -23,6 +24,7 @@ sealed class TranslateAction {
     object Init : TranslateAction()
     data class UpdateQuery(val query: String) : TranslateAction()
     data class ScheduleSubmit(val query: String) : TranslateAction()
+    object Clear : TranslateAction()
 }
 
 sealed class TranslateEffect {
@@ -30,6 +32,7 @@ sealed class TranslateEffect {
         val query: String,
         val submitAllowed: Boolean
     ) : TranslateEffect()
+    object ClearedResults : TranslateEffect()
 
     object SubmittedQuery : TranslateEffect()
     object CancelledQuery : TranslateEffect()
@@ -80,6 +83,10 @@ class TranslateActor(
                     )
                 )
             }
+            TranslateAction.Clear -> {
+                inputSubject.onNext(Unit)
+                Observable.just(TranslateEffect.ClearedResults)
+            }
             is TranslateAction.ScheduleSubmit -> {
                 submitSubject.onNext(action.query)
                 Observable.empty()
@@ -112,6 +119,7 @@ class TranslateReducer : Reducer<TranslateState, TranslateEffect> {
                 translations = null,
                 requestState = RequestState.Failed(effect.e)
             )
+            TranslateEffect.ClearedResults -> TranslateState()
         }
 }
 
